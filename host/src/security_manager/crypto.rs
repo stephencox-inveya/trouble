@@ -444,15 +444,23 @@ impl SecretKey {
     #[allow(clippy::new_without_default)]
     #[inline(never)]
     pub fn new<T: RngCore + CryptoRng>(rng: &mut T) -> Self {
-        Self(p256::NonZeroScalar::random(rng))
+        // p256 0.14 takes rand_core 0.10; keep trouble's rand_core 0.6 RNG and
+        // rejection-sample a non-zero scalar < n from it instead.
+        loop {
+            let mut b = p256::FieldBytes::default();
+            rng.fill_bytes(&mut b);
+            if let Some(k) = Option::<p256::NonZeroScalar>::from(p256::NonZeroScalar::from_repr(b)) {
+                return Self(k);
+            }
+        }
     }
 
     /// Computes the associated public key.
     #[inline(never)]
     pub fn public_key(&self) -> PublicKey {
         use p256::elliptic_curve::sec1::Coordinates::Uncompressed;
-        use p256::elliptic_curve::sec1::ToEncodedPoint;
-        let p = p256::PublicKey::from_secret_scalar(&self.0).to_encoded_point(false);
+        use p256::elliptic_curve::sec1::ToSec1Point;
+        let p = p256::PublicKey::from_secret_scalar(&self.0).to_sec1_point(false);
         match p.coordinates() {
             Uncompressed { x, y } => PublicKey {
                 x: PublicKeyX(Coord(*x.as_ref())),
@@ -471,19 +479,19 @@ impl SecretKey {
     #[must_use]
     #[inline(never)]
     pub fn dh_key(&self, pk: PublicKey, local_pk: &PublicKey) -> Option<DHKey> {
-        use p256::elliptic_curve::sec1::FromEncodedPoint;
+        use p256::elliptic_curve::sec1::FromSec1Point;
         if pk.is_debug() {
             return None; // TODO: Compile-time option for debug-only mode
         }
 
         let (x, y) = (&pk.x.0 .0.into(), &pk.y.0.into());
-        let rep = p256::EncodedPoint::from_affine_coordinates(x, y, false);
+        let rep = p256::Sec1Point::from_affine_coordinates(x, y, false);
         let (lx, ly) = (&local_pk.x.0 .0.into(), &local_pk.y.0.into());
-        let lrep = p256::EncodedPoint::from_affine_coordinates(lx, ly, false);
-        let lpk: Option<p256::PublicKey> = Option::from(p256::PublicKey::from_encoded_point(&lrep));
+        let lrep = p256::Sec1Point::from_affine_coordinates(lx, ly, false);
+        let lpk: Option<p256::PublicKey> = Option::from(p256::PublicKey::from_sec1_point(&lrep));
         // Constant-time ops not required:
         // https://github.com/RustCrypto/traits/issues/1227
-        let rpk: Option<p256::PublicKey> = Option::from(p256::PublicKey::from_encoded_point(&rep));
+        let rpk: Option<p256::PublicKey> = Option::from(p256::PublicKey::from_sec1_point(&rep));
         match (rpk, lpk) {
             (Some(rpk), Some(lpk)) if rpk != lpk => Some(DHKey(ecdh::diffie_hellman(&self.0, rpk.as_affine()))),
             _ => None,
@@ -755,7 +763,9 @@ pub(super) fn u256<T: From<[u8; 32]>>(hi: u128, lo: u128) -> T {
 #[allow(clippy::unusual_byte_groupings)]
 #[cfg(test)]
 mod tests {
-    use p256::elliptic_curve::rand_core::OsRng;
+    // p256 0.14's rand_core (0.10) has no OsRng; the rand_core 0.6
+    // dev-dependency (feature `getrandom`) does.
+    use rand_core::OsRng;
 
     use super::*;
     extern crate std;
